@@ -45,7 +45,11 @@
  * Version 0.9.3    26.11.2012                                               *
  * Version 0.9.4    05.01.2013  Anpassung CAN-Logging                        *
  * Version 0.9.5    24.02.2013  Ueberarbeitung USB-Zugriff                   *
-*  $Id$               *
+ * Version 0.9.6       10.2014  UVR61-3 neues Datenformat                    *
+ * Version 0.9.7       07.2016  UVR61-3 neues Datenformat auch im 2DL-Modus  *
+ * Version 0.9.8    02.08.2019  Maertin: 									 *
+ *						AUSG2/AUSG3 und Uhrzeit (24h, UTC) bei UVR61-3 neues *
+ *						Format in t0, csv und rrd korrekt. 					 * 
  *****************************************************************************/
 
 #include <sys/types.h>
@@ -77,7 +81,7 @@
 #define UVR61_3 0x90
 #define UVR1611 0x80
 
-// #define DEBUG 4
+// #define DEBUG 
 
 extern char *optarg;
 extern int optind, opterr, optopt;
@@ -101,10 +105,10 @@ void write_CSVCONSOLE(int regler, time_t datapoint_time);
 void write_rrd(int regler);
 void write_list(int regler);
 void berechne_werte(int anz_regler);
-void temperaturanz(int regler);
-void ausgaengeanz(int regler);
-void drehzahlstufenanz(int regler);
-void waermemengenanz(int regler);
+void temperaturanz(int anz_regler);
+void ausgaengeanz(int anz_regler);
+void drehzahlstufenanz(int anz_regler);
+void waermemengenanz(int anz_regler);
 void testfunktion(void);
 void zeitstempel(void);
 float berechnetemp(UCHAR lowbyte, UCHAR highbyte, int sensor);
@@ -121,6 +125,9 @@ void set_attribut(int zaehler, WINDOW *fenster);
 void test_farbe(void);
 int lies_conf(void);
 int get_modulmodus(void);
+int get_fw_version(void);
+int get_modultype(void);
+int is_uvr61_3_new_fmt(void);
 
 FILE *fp_logfile=NULL, *fp_varlogfile=NULL, *fp_csvfile=NULL, *fp_csvfile_2=NULL;
 struct termios oldtio; /* will be used to save old port settings */
@@ -137,7 +144,7 @@ int AUSG[14], DZR[8], DZStufe[8];   /* beruecksichtigt! S[1] ist Sensor1  */
 char *pBez_A[14], *pBez_DZR[8], *pBez_DZS[8];
 /* Waermezaehler */
 float  Mlstg[3],W_kwh[3], W_Mwh[3];
-int WMReg[3]; /* Das erste Element beginnt bei [1] */
+int WMReg[4]; /* Das erste Element beginnt bei [1] */
 
 char LogFileName[12], varLogFile[22];
 char sDatum[11], sZeit[11];
@@ -159,10 +166,13 @@ int usb_zugriff;
 int sock;
 int c;
 int merk_monat;
+int uvr61_3_new_fmt=0; /* 1 = UVR61-3 neues Format */
+int uvr61_3_new_fmt_check=0;
 UCHAR uvr_modus, uvr_typ=0, uvr_typ2=0;  /* uvr_typ2 -> 2. Geraet bei 2DL */
 UCHAR datenrahmen;
-
-char Version[]="Version 0.9.5 vom 27.02.2013";
+UCHAR fw_version;
+UCHAR modultype;
+char Version[]="Version 0.9.7 (07.2016)";
 
 WINDOW *fenster1=NULL, *fenster2=NULL;
 PANEL  *panel1=NULL, *panel2=NULL;
@@ -179,6 +189,11 @@ int main(int argc, char *argv[])
   int pruefz_ok = 0, t_count, anzahl_can_rahmen = 0;
   int i, j=2, sr=0;
 
+//  struct timespec tv = { 0, 10 * 1000000 }; //seconds, nanoseconds
+  struct timespec u_time;
+  u_time.tv_sec = 0;
+  u_time.tv_nsec = 10 * 1000000;
+  
   time_t beginn, jetzt, diff_zeit;
 
   datenrahmen=0x01;
@@ -266,7 +281,16 @@ int main(int argc, char *argv[])
 
   uvr_modus = get_modulmodus(); /* Welcher Modus 
                                 0xA8 (1DL) / 0xD1 (2DL) / 0xDC (CAN) */
-  fprintf(stderr, " CAN-Logging: uvr_modus -> %2X \n", uvr_modus);								
+#ifdef DEBUG
+  fprintf(stderr, " CAN-Logging: uvr_modus -> %2X \n", uvr_modus);
+#endif  
+  fw_version = get_fw_version();
+
+  if ( !get_modultype() ) /* muss laufen, damit is_uvr61_3_new_fmt() funktioniert */
+  {
+    fprintf(stderr, " Modultype konnte nicht ermittelt werden! \n");
+    return(0);
+  }
 
   if ( uvr_modus == 0xDC )
   {
@@ -276,7 +300,9 @@ int main(int argc, char *argv[])
       result  = recv(sock,empfbuf,18,0);
 
 	anzahl_can_rahmen = empfbuf[0];	
+#ifdef DEBUG	
     fprintf(stderr, " CAN-Logging: anzahl_can_rahmen -> %d \n", anzahl_can_rahmen);	
+#endif	
   }
   close_usb();
   
@@ -314,6 +340,9 @@ int main(int argc, char *argv[])
 		return(1);
 	  }
       retry_interval=5;
+      /* D-LOGG verschluckt sonst den naechsten request */
+      //(void) nanosleep(&tv, NULL );
+      nanosleep(&u_time,&u_time);
       write_erg=write(fd,sendbuf,1);
       if (write_erg == 1)    /* Lesen der Antwort*/
       {
@@ -339,37 +368,45 @@ int main(int argc, char *argv[])
 #endif
             //result=read(fd,akt_daten,57); /* Lesen von 115 Byte ohne Fehler??? fuer 2DL */
 	      if (FD_ISSET(fd,&rfds))
-           {
+        {
 		     ioctl(fd, FIONREAD, &in_bytes);
 #ifdef DEBUG
 		     fprintf(stderr,"Bytes im Puffer: %d\n",in_bytes);
 #endif
 		     if (uvr_modus == 0xA8)
 		     {
-			  switch(in_bytes)
-			  {
-				case 28: result=read(fd,akt_daten,115);
-						ioctl(fd, FIONREAD, &in_bytes); 
+          switch(in_bytes)
+          {
+            case 28: result=read(fd,akt_daten,115);
+                     ioctl(fd, FIONREAD, &in_bytes); 
 			               break;
-				case 57: result=read(fd,akt_daten,115);
-		                                ioctl(fd, FIONREAD, &in_bytes);
+            case 57: result=read(fd,akt_daten,115);
+		                 ioctl(fd, FIONREAD, &in_bytes);
 			               break;
-			  }
+            case 55: result=read(fd,akt_daten,115); /* UVR61-3 neues Format */
+		                 ioctl(fd, FIONREAD, &in_bytes);
+			               break;
+          }
 		     }
 		     if (uvr_modus == 0xD1)
 		     {
-			   switch(in_bytes)
-			   {
-				case 55: result=read(fd,akt_daten,115);
-					        ioctl(fd, FIONREAD, &in_bytes); 
+          switch(in_bytes)
+          {
+            case 55: result=read(fd,akt_daten,115);
+                     ioctl(fd, FIONREAD, &in_bytes); 
 			               break;
-				case 113: result=read(fd,akt_daten,115);
-		                                  ioctl(fd, FIONREAD, &in_bytes); 
-			               break;
-			   }
+            case 113: result=read(fd,akt_daten,115);
+                      ioctl(fd, FIONREAD, &in_bytes); 
+                      break;
+            case 109: result=read(fd,akt_daten,115); /* 2x UVR61-3 neues Format */
+                      ioctl(fd, FIONREAD, &in_bytes); 
+                      break;
+            case 111: result=read(fd,akt_daten,115); /* UVR61-3 neues Format (+ UVR 1611)*/
+                      ioctl(fd, FIONREAD, &in_bytes); 
+                      break;
+          }
 		     }
-		     
-	       }
+	      }
 #ifdef DEBUG
         if (akt_daten[0] != 0xAB)
         {
@@ -422,7 +459,7 @@ int main(int argc, char *argv[])
     {
       if (!ip_first)
       {
-	  fprintf(stderr, " CAN-Logging: IP initialisieren.\n");
+        fprintf(stderr, " CAN-Logging: IP initialisieren.\n");
         sock = socket(PF_INET, SOCK_STREAM, 0);
         if (sock == -1)
         {
@@ -436,99 +473,98 @@ int main(int argc, char *argv[])
           do_cleanup(fenster1, fenster2);
           return 3;
         }
-		if (ip_handling(sock) == -1)
-		{
-			fprintf(stderr, "%s: Fehler im Initialisieren der IP-Kommunikation\n", argv[0]);
-			do_cleanup(fenster1, fenster2);
-			return 4;
-		}
+        if (ip_handling(sock) == -1)
+        {
+          fprintf(stderr, "%s: Fehler im Initialisieren der IP-Kommunikation\n", argv[0]);
+          do_cleanup(fenster1, fenster2);
+          return 4;
+        }
       }
       do
       {
         do
         {
-		  uvr_modus = get_modulmodus();
-		  if ( uvr_modus == 0xDC )
-		  {
-			sendbuf[0]=KONFIGCAN;
-			write_erg=send(sock,sendbuf,1,0);
-			if (write_erg == 1)    /* Lesen der Antwort */
-				result  = recv(sock,empfbuf,18,0);
-			uvr_modus_tmp = get_modulmodus();
-			if ( anzahl_can_rahmen < datenrahmen )
-			{
-				fprintf(stderr,"Falsche Parameterangabe: -r %d , setze auf 1. Datenrahmen!\n",datenrahmen);
-				datenrahmen = 1;
-				sendbuf_can[1] = datenrahmen;
-			}
-			send_bytes=send(sock,sendbuf_can,2,0);
-		  }
-		  else
-			send_bytes=send(sock,sendbuf,1,0);
+          uvr_modus = get_modulmodus();
+          if ( uvr_modus == 0xDC )
+          {
+            sendbuf[0]=KONFIGCAN;
+            write_erg=send(sock,sendbuf,1,0);
+            if (write_erg == 1)    /* Lesen der Antwort */
+              result  = recv(sock,empfbuf,18,0);
+            uvr_modus_tmp = get_modulmodus();
+            if ( anzahl_can_rahmen < datenrahmen )
+            {
+              fprintf(stderr,"Falsche Parameterangabe: -r %d , setze auf 1. Datenrahmen!\n",datenrahmen);
+              datenrahmen = 1;
+              sendbuf_can[1] = datenrahmen;
+            }
+            send_bytes=send(sock,sendbuf_can,2,0);
+          }
+          else
+            send_bytes=send(sock,sendbuf,1,0);
 		  
           if ( (send_bytes == 1 && uvr_modus != 0xDC) || (send_bytes == 2 && uvr_modus == 0xDC) )    /* Lesen der Antwort */
           {
-			  if ( uvr_modus == 0xDC )
-			  {
-			    i = 1;
-				do
-				{
-					result  = recv(sock,akt_daten,115,0);
-					fprintf(stderr, " CAN-Logging: Response Kennung -> %02X  Wartezeit -> %02d Sec  Byte3: %02X \n", akt_daten[0], akt_daten[1], akt_daten[2]);
-					if ( akt_daten[0] == 0xBA )
-					{
-						if ( akt_daten[2] == (akt_daten[0] + akt_daten[1]) % 0x100 )
-						{
-							zeitstempel();
-							fprintf(stderr, "%s CAN-Logging: %d. Schlafenszeit fuer %d Sekunden\n",sZeit ,i , akt_daten[1]);
-							if ( shutdown(sock,SHUT_RDWR) == -1 ) /* IP-Socket schliessen */
-							{
-								zeitstempel();
-								fprintf(stderr, "\n %s Fehler beim Schliessen der IP-Verbindung!\n", sZeit);
-							}
-							sleep(akt_daten[1]);
-							sr = start_socket(fenster1, fenster2);
-							if (sr > 1)
-							{
-								return sr;
-							}
-							i++;
-							sleep(akt_daten[1]);
-							uvr_modus_tmp = get_modulmodus();
-							if ( uvr_modus_tmp == 0xDC )
-								send_bytes=send(sock,sendbuf_can,2,0);
-						}
-					}
-					if ( i > 3 )
-					{
-						fprintf(stderr, " CAN-Logging: keine Daten empfangen.\n");
-						return -1;
-					}
-				}
-				while( akt_daten[0] == 0xBA && i < 4 );
-			  }
-			  else
-			  {
-				do
-				{
-					/* muss jedesmal gesetzt werden! */
-					FD_ZERO(&rfds);
-					FD_SET(sock, &rfds);
-					/* Wait up to five seconds. */
-					tv.tv_sec = retry_interval;
-					tv.tv_usec = 0;
-					retval = select(sock+1, &rfds, NULL, NULL, &tv);
-					/* Don't rely on the value of tv now -  will contain remaining time or so */
-					zeitstempel();
+            if ( uvr_modus == 0xDC )
+            {
+              i = 1;
+              do
+              {
+                result  = recv(sock,akt_daten,115,0);
+                fprintf(stderr, " CAN-Logging: Response Kennung -> %02X  Wartezeit -> %02d Sec  Byte3: %02X \n", akt_daten[0], akt_daten[1], akt_daten[2]);
+                if ( akt_daten[0] == 0xBA )
+                {
+                  if ( akt_daten[2] == (akt_daten[0] + akt_daten[1]) % 0x100 )
+                  {
+                    zeitstempel();
+                    fprintf(stderr, "%s CAN-Logging: %d. Schlafenszeit fuer %d Sekunden\n",sZeit ,i , akt_daten[1]);
+                    if ( shutdown(sock,SHUT_RDWR) == -1 ) /* IP-Socket schliessen */
+                    {
+                      zeitstempel();
+                      fprintf(stderr, "\n %s Fehler beim Schliessen der IP-Verbindung!\n", sZeit);
+                    }
+                    sleep(akt_daten[1]);
+                    sr = start_socket(fenster1, fenster2);
+                    if (sr > 1)
+                      return sr;
+                      
+                    i++;
+                    sleep(akt_daten[1]);
+                    uvr_modus_tmp = get_modulmodus();
+                    if ( uvr_modus_tmp == 0xDC )
+                      send_bytes=send(sock,sendbuf_can,2,0);
+                  }
+                }
+                if ( i > 3 )
+                {
+                  fprintf(stderr, " CAN-Logging: keine Daten empfangen.\n");
+                    return -1;
+                }
+              }
+              while( akt_daten[0] == 0xBA && i < 4 );
+            }
+            else
+            {
+              do
+              {
+                /* muss jedesmal gesetzt werden! */
+                FD_ZERO(&rfds);
+                FD_SET(sock, &rfds);
+                /* Wait up to five seconds. */
+                tv.tv_sec = retry_interval;
+                tv.tv_usec = 0;
+                retval = select(sock+1, &rfds, NULL, NULL, &tv);
+                /* Don't rely on the value of tv now -  will contain remaining time or so */
+                zeitstempel();
 
-					if (retval == -1)
-						perror("select(sock)");
-					else if (retval)
-						{
+                if (retval == -1)
+                  perror("select(sock)");
+                else if (retval)
+                {
 #ifdef DEBUG
 						fprintf(stderr,"Data is available now. %d.%d\n",(int)tv.tv_sec,(int)tv.tv_usec);
 #endif
-						result  = recv(sock,akt_daten,115,0);
+                  result  = recv(sock,akt_daten,115,0);
 
 #ifdef DEBUG
 						fprintf(stderr,"r%d s%d received bytes=%d \n",retry,send_retry,result);
@@ -536,30 +572,32 @@ int main(int argc, char *argv[])
 							fprintf(stderr," buffer: %X\n",akt_daten[0]);
 #endif
                 /* FD_ISSET(socket, &rfds) will be true. */
-						}
-					else
-					{
+                }
+                else
+                {
 #ifdef DEBUG
 						fprintf(stderr,"%s - No data within %d seconds.r%d s%d\n",sZeit,retry_interval,retry,send_retry);
 #endif
-						sleep(retry_interval);
-					}
-				retry++;
-				}
-				while( retry < 3 && result < 28);
-			  }
-
+                  sleep(retry_interval);
+                }
+                retry++;
+              }
+              while( retry < 3 && result < 28);
+            }
             retry=0;
           }
 #ifdef DEBUG
         else
           fprintf(stderr," send_bytes=%d - not ok! \n",send_bytes);
 #endif
-        send_retry++;
+          send_retry++;
         }
         while ( send_retry <= 2 && result < 28 );
         send_retry=0;
         init_retry++;
+#ifdef DEBUG
+        fprintf(stderr," init_retry=%d ; result=%d \n",init_retry, result);
+#endif
       }
       while ( init_retry <= 2 && result < 28 );
 
@@ -665,7 +703,7 @@ int main(int argc, char *argv[])
         {
           fprintf(stderr,"\nRohdaten der UVR61-3:\n");
           for (i=0;i<27;i++)
-            printf("%2x; ", akt_daten[i]);
+            fprintf(stderr,"%2x; ", akt_daten[i]);
         }
 #endif
         /* Berechnung der Werte zum Anzeigen bzw. Schreiben in eine Datei */
@@ -673,9 +711,15 @@ int main(int argc, char *argv[])
 
         if (dauer == 0)
         {
+#ifdef DEBUG
+          fprintf(stderr,"1. Geraet:\n");
+#endif
           write_CSVCONSOLE(1, daten_zeitpunkt );
           if (uvr_modus == 0xD1)  /* zwei Regler vorhanden */
           {
+#ifdef DEBUG
+          fprintf(stderr,"Jetzt muss 2. Geraet kommen:\n");
+#endif
             berechne_werte(2);
             write_CSVCONSOLE(2, daten_zeitpunkt );
           }
@@ -783,10 +827,8 @@ int main(int argc, char *argv[])
                 fprintf(stderr,"%s - pruefziffer   diff_zeit:%d  dauer:%d \n",sZeit,(int)diff_zeit,(int)dauer);
               else if(!kennung_ok)
                 fprintf(stderr,"%s - K%d PZ%d  KENN%X    diff_zeit:%d  dauer:%d \n",sZeit,kennung_ok,pruefz_ok,akt_daten[0],(int)diff_zeit,(int)dauer);
-#if DEBUG>2
               else
                 fprintf(stderr,"%s - K%d PZ%d  KENN%X    diff_zeit:%d  dauer:%d \n",sZeit,kennung_ok,pruefz_ok,akt_daten[0],(int)diff_zeit,(int)dauer);
-#endif
             }
 #endif
           }
@@ -829,6 +871,8 @@ int main(int argc, char *argv[])
       }
     }
     while( (c != 'q') && (diff_zeit < dauer ) );     /* ende Daten vorhanden */
+	if (akt_daten[0] == 0)
+		c = 'q';
   }       /* reader loop */
   while(c != 'q');
 
@@ -1025,7 +1069,7 @@ int check_arg_getopt(int arg_c, char *arg_v[])
       {
         fprintf(stderr,"\n    UVR1611 / UVR61-3 aktuelle Daten lesen vom D-LOGG USB oder BL-NET\n");
         fprintf(stderr,"    %s \n",Version);
-		printf("    $Id$ \n");
+		printf("    $Id: dl-aktuelle-datenx.c 121 2013-10-13 18:47:23Z roemix $ \n");
         printf("\n");
         return -1;
         }
@@ -1183,7 +1227,9 @@ int check_pruefsumme(void)
     case UVR1611: anzByte_uvr1 = 55; break; /* UVR1611 */
     case UVR61_3: anzByte_uvr1 = 26; break; /* UVR61-3 */
   }
-
+  if ( is_uvr61_3_new_fmt() )
+    anzByte_uvr1 = 53; /* UVR61-3 neues Format */
+   
   if (uvr_modus == 0xA8)
   {
     for(i=0;i<=anzByte_uvr1;i++)
@@ -1203,6 +1249,8 @@ int check_pruefsumme(void)
       case UVR1611: anzByte_uvr2 = 55; break; /* UVR1611 */
       case UVR61_3: anzByte_uvr2 = 26; break; /* UVR61-3 */
     }
+    if ( is_uvr61_3_new_fmt() )
+      anzByte_uvr2 = 53; /* UVR61-3 neues Format */
 
     for(i=0;i<=(anzByte_uvr1 + 1 + anzByte_uvr2);i++)
       pruefz = pruefz + akt_daten[i];
@@ -1319,6 +1367,7 @@ int close_logfile(FILE * fp)
 void check_kennung(int received_Bytes)
 {
 #ifdef DEBUG
+  fprintf(stderr,"in check_kennung()\n received_Bytes: %d\n",received_Bytes);
   fprintf(stderr," akt_daten[0] %X\n",akt_daten[0]);
 #endif
 
@@ -1338,8 +1387,16 @@ void check_kennung(int received_Bytes)
     }
     if (akt_daten[0] == UVR61_3)
     {
-      if (received_Bytes != 84 && received_Bytes != 55)
-        akt_daten[0]=0x0;
+      if ( is_uvr61_3_new_fmt() )
+      {
+        if (received_Bytes != 111 && received_Bytes != 109)
+          akt_daten[0]=0x0;
+      }
+        else if (received_Bytes != 84 && received_Bytes != 55)
+          akt_daten[0]=0x0;
+#ifdef DEBUG
+  fprintf(stderr,"in if (akt_daten[0] == UVR61_3); akt_daten[0] %X\n",akt_daten[0]);
+#endif
       return;
     }
   }
@@ -1354,8 +1411,14 @@ void check_kennung(int received_Bytes)
     }
     if (akt_daten[0] == UVR61_3)
     {
-      if (received_Bytes != 28)
+      if ( is_uvr61_3_new_fmt() )
+      {
+        if (received_Bytes != 55)
+          akt_daten[0]=0x0;
+      }
+      else if (received_Bytes != 28)
         akt_daten[0]=0x0;
+        
       return;
     }
   }
@@ -1513,7 +1576,7 @@ void berechne_werte(int anz_regler)
   int i, j, anz_bytes_1 = 0, anz_bytes_2 = 0;
 
   /* anz_regler = 1 : nur ein Regler vorhanden oder der erste Regler bei 0xD1 */
-  if (anz_regler == 2)
+  if ((anz_regler == 2) && (fw_version < 200)) /* UVR61-3 altes Format */
   {
     i = 0;
     switch(akt_daten[0])
@@ -1526,22 +1589,47 @@ void berechne_werte(int anz_regler)
       case UVR1611: anz_bytes_2 = 56; break; /* UVR1611 */
       case UVR61_3: anz_bytes_2 = 27; break; /* UVR61-3 */
     }
+  }
+
+  if ((anz_regler == 2) && (is_uvr61_3_new_fmt()) ) /* UVR61-3 neues Format */
+  {
+    i = 0;
+    switch(akt_daten[0])
+    {
+      case UVR1611: anz_bytes_1 = 56; break; /* UVR1611 */
+      case UVR61_3: anz_bytes_1 = 54; break; /* UVR61-3 neues Format */
+    }
+    switch(akt_daten[anz_bytes_1])
+    {
+      case UVR1611: anz_bytes_2 = 56; break; /* UVR1611 */
+      case UVR61_3: anz_bytes_2 = 54; break; /* UVR61-3 neues Format */
+    }
+#ifdef DEBUG
+    fprintf(stderr,"In berechne_werte() anz_regler=%d \nAnz_Bytes_Geraet-1: %d Anz_Bytes_Geraet-2: %d akt_daten[0]: %d\n-#-\n",anz_regler,anz_bytes_1,anz_bytes_2,akt_daten[0]);
+#endif
+  }
 
 #ifdef DEBUG
-    fprintf(stderr,"Anzahl Bytes Geraet-1: %d Anzahl Bytes Geraet-1: %d\n",anz_bytes_1,anz_bytes_2);
-    for (i=0;i<(anz_bytes_1+anz_bytes_2);i++) // Testausgabe 2DL
-    {
-        fprintf(stderr,"%2x; ", akt_daten[i]);
-    }
-    fprintf(stderr,"\n");
+	if (anz_regler == 2)
+	{
+		fprintf(stderr,"anz_regler: %d Anzahl Bytes Geraet-1: %d Anzahl Bytes Geraet-2: %d\n",anz_regler,anz_bytes_1,anz_bytes_2);
+		for (i=0;i<(anz_bytes_1+anz_bytes_2);i++) // Testausgabe 2DL
+		{
+			fprintf(stderr,"%2x; ", akt_daten[i]);
+		}
+		fprintf(stderr,"\n");
+	}
 #endif
-    i = 0;
-    for (j=anz_bytes_1;j<(anz_bytes_1+anz_bytes_2) ;j++)
-    {
-      akt_daten[i] = akt_daten[j];
-      i++;
-    }
-    akt_daten[i]='\0'; /* mit /000 abschliessen!! */
+	if (anz_regler == 2)
+	{
+		i = 0;
+		for (j=anz_bytes_1;j<(anz_bytes_1+anz_bytes_2) ;j++)
+		{
+			akt_daten[i] = akt_daten[j];
+			i++;
+		}
+		akt_daten[i]='\0'; /* mit /000 abschliessen!! */
+	}
 #ifdef DEBUG
     for (i=0;i<anz_bytes_2;i++) // Testausgabe 2DL
     {
@@ -1549,7 +1637,6 @@ void berechne_werte(int anz_regler)
     }
     fprintf(stderr,"\n");
 #endif
-  }
 
   temperaturanz(anz_regler);
   ausgaengeanz(anz_regler);
@@ -1570,10 +1657,21 @@ void temperaturanz(int regler)
   if (regler == 2)  /* 2. Geraet vorhanden */
     uvr_typ = uvr_typ2;
 
-  switch(uvr_typ)
+  if ( !is_uvr61_3_new_fmt() )
   {
-    case UVR1611: anzSensoren = 16; break; /* UVR1611 */
-    case UVR61_3: anzSensoren = 6; break; /* UVR61-3 */
+    switch(uvr_typ)
+    {
+      case UVR1611: anzSensoren = 16; break; /* UVR1611 */
+      case UVR61_3: anzSensoren = 6; break; /* UVR61-3 */
+    }
+  }
+  else
+  {
+    switch(uvr_typ)
+    {
+      case UVR1611: anzSensoren = 16; break; /* UVR1611 */
+      case UVR61_3: anzSensoren = 15; break; /* UVR61-3 neues Format */
+    }
   }
 
   /* vor berechnetemp() die oberen 4 Bit des HighByte auswerten!!!! */
@@ -1637,7 +1735,8 @@ void ausgaengeanz(int regler)
         AUSG[z+8] = 0;
      }
   }
-  else if (uvr_typ == UVR61_3) /* UVR61-3 */
+
+  if ( (uvr_typ == UVR61_3) && ( !is_uvr61_3_new_fmt() ) ) /* UVR61-3 altes Format */
   {
     for(z=1;z<4;z++)
     {
@@ -1647,6 +1746,17 @@ void ausgaengeanz(int regler)
         AUSG[z] = 0;
      }
   }
+  if ( (uvr_typ == UVR61_3) && is_uvr61_3_new_fmt() ) /* UVR61-3 neues Format */
+  {
+    for(z=1;z<4;z++)
+    {
+      if (tstbit( akt_daten[31], z-1 ) == 1)
+        AUSG[z] = 1;
+      else
+        AUSG[z] = 0;
+     }
+  }
+  
   uvr_typ=temp_uvr_typ;
 }
 
@@ -1701,7 +1811,8 @@ void drehzahlstufenanz(int regler)
       DZStufe[7] = 0;
     }
   }
-    else if (uvr_typ == UVR61_3) /* UVR61-3 */
+
+  if ( (uvr_typ == UVR61_3)  && ( !is_uvr61_3_new_fmt() ) ) /* UVR61-3 altes Format */
   {
     if ( ((akt_daten[14] & UVR61_3) == 0 ) && (akt_daten[14] != 0 ) ) /* ist das hochwertigste Bit gesetzt ? */
     {
@@ -1714,6 +1825,21 @@ void drehzahlstufenanz(int regler)
       DZStufe[1] = 0;
     }
   }
+
+  if ( (uvr_typ == UVR61_3)  && is_uvr61_3_new_fmt() ) /* UVR61-3 neues Format */
+  {
+    if ( ((akt_daten[32] & UVR61_3) == 0 ) && (akt_daten[32] != 0 ) ) /* ist das hochwertigste Bit gesetzt ? */
+    {
+      DZR[1] = 1;
+      DZStufe[1] = akt_daten[32] & 0x1F; /* die drei hochwertigsten Bits loeschen */
+    }
+    else
+    {
+      DZR[1] = 0;
+      DZStufe[1] = 0;
+    }
+  }
+
   uvr_typ=temp_uvr_typ;
 }
 
@@ -1770,7 +1896,7 @@ void waermemengenanz(int regler)
     }
   }
 
-  if (uvr_typ == UVR61_3) /* UVR61-3 */
+  if ((uvr_typ == UVR61_3) && (fw_version < 200)) /* UVR61-3 altes Format*/
   {
     if (akt_daten[16] == 1) /* ( tstbit(akt_daten[16],0) == 1)  akt_daten[17] und akt_daten[18] sind Volumenstrom */
       WMReg[1] = 1;
@@ -1781,13 +1907,52 @@ void waermemengenanz(int regler)
       W_Mwh[1] = akt_daten[26]*0x1000000 + akt_daten[25]*0x10000 + akt_daten[24]*0x100 + akt_daten[23];
     }
   }
+  
+  if ((uvr_typ == UVR61_3) && (fw_version >= 200)) /* UVR61-3 neues Format*/
+  {
+    switch(akt_daten[35])
+    {
+    case 1: WMReg[1] = 1; break; /* Waermemengenzaehler1 */
+    case 2: WMReg[2] = 1; break; /* Waermemengenzaehler2 */
+    case 3: WMReg[1] = 1;        /* Waermemengenzaehler1 */
+            WMReg[2] = 1;  break; /* Waermemengenzaehler2 */
+    case 4: WMReg[3] = 1; break; /* Waermemengenzaehler3 */
+    case 5: WMReg[1] = 1;        /* Waermemengenzaehler1 */
+            WMReg[3] = 1;  break; /* Waermemengenzaehler2 */
+    case 6: WMReg[2] = 1;        /* Waermemengenzaehler1 */
+            WMReg[3] = 1;  break; /* Waermemengenzaehler3 */
+    case 7: WMReg[1] = 1;        /* Waermemengenzaehler1 */
+            WMReg[2] = 1;        /* Waermemengenzaehler2 */			
+            WMReg[3] = 1;  break; /* Waermemengenzaehler3 */			
+    }
+	
+    if (WMReg[1] == 1)
+    {
+      Mlstg[1] = (256*(float)akt_daten[37]+(float)akt_daten[36])/10;
+      W_kwh[1] = ( (float)akt_daten[39]*256 + (float)akt_daten[38] )/10;
+      W_Mwh[1] = akt_daten[41]*0x1000000 + akt_daten[40]*0x10000 + akt_daten[24]*0x100 + akt_daten[23];
+    }
+    if (WMReg[2] == 1)
+    {
+      Mlstg[2] = (256*(float)akt_daten[43]+(float)akt_daten[42])/10;
+      W_kwh[2] = ( (float)akt_daten[45]*256 + (float)akt_daten[44] )/10;
+      W_Mwh[2] = akt_daten[47]*0x1000000 + akt_daten[46]*0x10000 + akt_daten[24]*0x100 + akt_daten[23];
+    }
+    if (WMReg[3] == 1)
+    {
+      Mlstg[3] = (256*(float)akt_daten[49]+(float)akt_daten[48])/10;
+      W_kwh[3] = ( (float)akt_daten[51]*256 + (float)akt_daten[50] )/10;
+      W_Mwh[3] = akt_daten[53]*0x1000000 + akt_daten[52]*0x10000 + akt_daten[24]*0x100 + akt_daten[23];
+    }
+  }
+  
   uvr_typ=temp_uvr_typ;
 }
 
 /* Funktion zum Testen */
 void testfunktion(void)
 {
-  int result;
+  int result=0;
   UCHAR sendbuf[1];       /*  sendebuffer fuer die Request-Commandos*/
 //  int sendbuf[1];       /*  sendebuffer fuer die Request-Commandos*/
   UCHAR empfbuf[256];
@@ -1954,7 +2119,7 @@ int xorbit( int word, int bit )
 /* Ausgabe der Werte auf den Bildschirm unter Nutzung von ncurses */
 void bildschirmausgabe(WINDOW *fenster)
 {
-  int i, j, c, unsichtbar;
+  int i, j, unsichtbar; // c,
   UCHAR temp_byte = 0;
 
   c=0;
@@ -2472,25 +2637,41 @@ void write_CSVFile(int regler, FILE *fp, time_t datapoint_time)
   if (!fp)
     return;
 
-  switch(uvr_typ)
+  if ( !is_uvr61_3_new_fmt() ) /* UVR61-3 altes Format */
   {
-    case UVR1611: anzSensoren = 16; break; /* UVR1611 */
-    case UVR61_3: anzSensoren = 6; break; /* UVR61-3 */
+    switch(uvr_typ)
+    {
+      case UVR1611: anzSensoren = 16; break; /* UVR1611 */
+      case UVR61_3: anzSensoren = 6; break; /* UVR61-3 */
+    }
+  }
+  else
+  {
+    switch(uvr_typ)
+    {
+      case UVR1611: anzSensoren = 16; break; /* UVR1611 */
+      case UVR61_3: anzSensoren = 15; break; /* UVR61-3 neues Format */
+    }
   }
 
   struct tm *zeit;
   zeit = localtime(&datapoint_time);
 
-  char  tag[5],monat[5],jahr[10],uhrzeit[256];
+  //maertin: Fixed Time (24h Format, UTC)
+  //char  tag[5],monat[5],jahr[10],uhrzeit[256];
+  char  tag[5],monat[5],jahr[10],stunde[5],minute[5],sekunde[5];
   strftime(tag, 3, "%d", zeit);
   strftime(monat, 3, "%m", zeit);
   strftime(jahr, 3, "%y", zeit);
-//  strftime(uhrzeit, 10, "%X", zeit); /* Problem bei Oracle-Linux 64 (Redhat 6.4) 64Bit */
-  strftime(uhrzeit, 10, "%T", zeit);
+  strftime(stunde, 3, "%H", zeit);
+  strftime(minute, 3, "%M", zeit);
+  strftime(sekunde, 3, "%S", zeit); 
+  //strftime(uhrzeit, 10, "%T", zeit);
 
   /* WINSOL hat kein \n am Ende des ascii output */
   /* deshalb hier */
-  fprintf(fp,"\n%s.%s.%s;%s;",tag,monat,jahr,uhrzeit);
+  //fprintf(fp,"\n%s.%s.%s;%s;",tag,monat,jahr,uhrzeit);
+  fprintf(stdout,"%s.%s.%s;%s.%s.%s;",tag,monat,jahr,stunde,minute,sekunde);
 
   for(i=1;i<=anzSensoren;i++) /* sensor-Bezeichnungen */
   {
@@ -2564,7 +2745,7 @@ void write_CSVFile(int regler, FILE *fp, time_t datapoint_time)
     }
   }
 
-  if (uvr_typ == UVR61_3) /* UVR61-3 */
+  if (uvr_typ == UVR61_3 && !is_uvr61_3_new_fmt() ) /* UVR61-3 altes Format*/
   {
     fprintf(fp,"%2d;%2d;",AUSG[1],DZStufe[1]);
     fprintf(fp,"%2d;%2d;",AUSG[2],AUSG[3]);
@@ -2591,6 +2772,39 @@ void write_CSVFile(int regler, FILE *fp, time_t datapoint_time)
     fprintf(stdout,"\n");
   }
 
+  if (uvr_typ == UVR61_3 && is_uvr61_3_new_fmt() ) /* UVR61-3 neues Format*/
+  {
+    fprintf(stdout,"%2d;%2d;",AUSG[1],DZStufe[1]);
+    fprintf(stdout,"%2d;%2d;",AUSG[2],AUSG[3]);  //maertin: bugfix for missing AUSGANG 2
+
+    if (tstbit(akt_daten[33],7) == 0) /* Analogausgang 1*/
+    {
+      temp_byte = akt_daten[33] & ~(1 << 8); /* oberestes Bit auf 0 setzen */
+      fprintf(stdout,"%.1f:",(float)temp_byte / 10);
+    }
+    else
+      fprintf(stdout,"0.0:"); /* Analogausgang nicht aktiv */
+
+    if (tstbit(akt_daten[34],7) == 0) /* Analogausgang 2*/
+    {
+      temp_byte = akt_daten[34] & ~(1 << 8); /* oberestes Bit auf 0 setzen */
+      fprintf(stdout,"%.1f:",(float)temp_byte / 10);
+    }
+    else
+      fprintf(stdout,"0.0:"); /* Analogausgang nicht aktiv */
+
+    for (i=1;i<=2;i++)
+    {
+      if (WMReg[i] == 1)
+      {
+// noch anpassen?:        fprintf(stdout,"%d:",akt_daten[18]*0x100 + akt_daten[17]);
+        fprintf(stdout,"%.1f:%.0f:%.1f:",Mlstg[i], W_Mwh[i],W_kwh[i]);
+      }
+      else
+        fprintf(stdout,"  ---;  ---;  ---;  ---;");
+	}
+  }
+  
   fflush(fp);
   uvr_typ = temp_uvr_typ;
 }
@@ -2607,21 +2821,39 @@ void write_CSVCONSOLE(int regler, time_t datapoint_time)
   struct tm *zeit;
   zeit = localtime(&datapoint_time);
 
-  char  tag[5],monat[5],jahr[10],uhrzeit[256];
+  //maertin: Fixed Time (24h Format, UTC)
+  //char  tag[5],monat[5],jahr[10],uhrzeit[256];
+  char  tag[5],monat[5],jahr[10],stunde[5],minute[5],sekunde[5];
   strftime(tag, 3, "%d", zeit);
   strftime(monat, 3, "%m", zeit);
   strftime(jahr, 3, "%y", zeit);
-  strftime(uhrzeit, 10, "%X", zeit);
-
-  fprintf(stdout,"%s.%s.%s;%s;",tag,monat,jahr,uhrzeit);
+  strftime(stunde, 3, "%H", zeit);
+  strftime(minute, 3, "%M", zeit);
+  strftime(sekunde, 3, "%S", zeit);
+ 
+  //strftime(uhrzeit, 10, "%T", zeit);
+  //fprintf(stdout,"%s.%s.%s;%s;",tag,monat,jahr,uhrzeit);
+  fprintf(stdout,"%s.%s.%s;%s.%s.%s;",tag,monat,jahr,stunde,minute,sekunde);
+  
   temp_uvr_typ = uvr_typ;
   if (regler == 2)  /* 2. Geraet vorhanden */
     uvr_typ = uvr_typ2;
 //printf("UVR-Typ: %x\n",uvr_typ);
-  switch(uvr_typ)
+  if ( !is_uvr61_3_new_fmt() ) /* UVR61-3 altes Format */
   {
-    case UVR1611: anzSensoren = 16; break; /* UVR1611 */
-    case UVR61_3: anzSensoren = 6; break; /* UVR61-3 */
+    switch(uvr_typ)
+    {
+      case UVR1611: anzSensoren = 16; break; /* UVR1611 */
+      case UVR61_3: anzSensoren = 6; break; /* UVR61-3 */
+    }
+  }
+  else
+  {
+    switch(uvr_typ)
+    {
+      case UVR1611: anzSensoren = 16; break; /* UVR1611 */
+      case UVR61_3: anzSensoren = 15; break; /* UVR61-3 neues Format */
+    }
   }
 
   for(i=1;i<=anzSensoren;i++) /* sensor-Bezeichnungen */
@@ -2692,7 +2924,7 @@ void write_CSVCONSOLE(int regler, time_t datapoint_time)
       }
   }
 
-  if (uvr_typ == UVR61_3) /* UVR61-3 */
+  if (uvr_typ == UVR61_3 && !is_uvr61_3_new_fmt() ) /* UVR61-3 altes Format*/
   {
     fprintf(stdout,"%2d;%2d;",AUSG[1],DZStufe[1]);
     fprintf(stdout,"%2d;%2d;",AUSG[2],AUSG[3]);
@@ -2714,6 +2946,39 @@ void write_CSVCONSOLE(int regler, time_t datapoint_time)
       fprintf(stdout,"  ---;  ---;  ---;  ---;");
   }
 
+  if (uvr_typ == UVR61_3 && is_uvr61_3_new_fmt() ) /* UVR61-3 neues Format*/
+  {
+    fprintf(stdout,"%2d;%2d;",AUSG[1],DZStufe[1]);
+    fprintf(stdout,"%2d;%2d;",AUSG[2],AUSG[3]);  //maertin: bugfix for missing AUSGANG 2
+
+    if (tstbit(akt_daten[33],7) == 0) /* Analogausgang 1*/
+    {
+      temp_byte = akt_daten[33] & ~(1 << 8); /* oberestes Bit auf 0 setzen */
+      fprintf(stdout,"%.1f:",(float)temp_byte / 10);
+    }
+    else
+      fprintf(stdout,"0.0:"); /* Analogausgang nicht aktiv */
+
+    if (tstbit(akt_daten[34],7) == 0) /* Analogausgang 2*/
+    {
+      temp_byte = akt_daten[34] & ~(1 << 8); /* oberestes Bit auf 0 setzen */
+      fprintf(stdout,"%.1f:",(float)temp_byte / 10);
+    }
+    else
+      fprintf(stdout,"0.0:"); /* Analogausgang nicht aktiv */
+
+    for (i=1;i<=2;i++)
+    {
+      if (WMReg[i] == 1)
+      {
+// noch anpassen?:        fprintf(stdout,"%d:",akt_daten[18]*0x100 + akt_daten[17]);
+        fprintf(stdout,"%.1f:%.0f:%.1f:",Mlstg[i], W_Mwh[i],W_kwh[i]);
+      }
+      else
+        fprintf(stdout,"  ---;  ---;  ---;  ---;");
+	}
+  }
+
   fprintf(stdout,"\n");
   uvr_typ = temp_uvr_typ;
 }
@@ -2731,10 +2996,21 @@ void write_rrd(int regler)
   if (regler == 2)  /* 2. Geraet vorhanden */
     uvr_typ = uvr_typ2;
 //printf("UVR-Typ: %x\n",uvr_typ);
-  switch(uvr_typ)
+  if ( !is_uvr61_3_new_fmt() ) /* UVR61-3 altes Format */
   {
-    case UVR1611: anzSensoren = 16; break; /* UVR1611 */
-    case UVR61_3: anzSensoren = 6; break; /* UVR61-3 */
+    switch(uvr_typ)
+    {
+      case UVR1611: anzSensoren = 16; break; /* UVR1611 */
+      case UVR61_3: anzSensoren = 6; break; /* UVR61-3 */
+    }
+  }
+  else
+  {
+    switch(uvr_typ)
+    {
+      case UVR1611: anzSensoren = 16; break; /* UVR1611 */
+      case UVR61_3: anzSensoren = 15; break; /* UVR61-3 neues Format */
+    }
   }
 
   for(i=1;i<=anzSensoren;i++) /* sensor-Bezeichnungen */
@@ -2805,7 +3081,7 @@ void write_rrd(int regler)
     }
   }
 
-  if (uvr_typ == UVR61_3) /* UVR61-3 */
+  if ((uvr_typ == UVR61_3) && !is_uvr61_3_new_fmt() ) /* UVR61-3 altes Format*/
   {
     fprintf(stdout,"%d:%d:",AUSG[1],DZStufe[1]);
     fprintf(stdout,"%d:%d:",AUSG[2],AUSG[3]);
@@ -2827,6 +3103,39 @@ void write_rrd(int regler)
       fprintf(stdout,"0:0:0:0:0");
   }
 
+  if ((uvr_typ == UVR61_3) && is_uvr61_3_new_fmt() ) /* UVR61-3 neues Format*/
+  {
+    fprintf(stdout,"%d:%d:",AUSG[1],DZStufe[1]);
+    fprintf(stdout,"%d:%d:",AUSG[2],AUSG[3]); //maertin: bugfix for missing AUSGANG 2
+
+    if (tstbit(akt_daten[33],7) == 0) /* Analogausgang 1*/
+    {
+      temp_byte = akt_daten[33] & ~(1 << 8); /* oberestes Bit auf 0 setzen */
+      fprintf(stdout,"%.1f:",(float)temp_byte / 10);
+    }
+    else
+      fprintf(stdout,"0.0:"); /* Analogausgang nicht aktiv */
+
+    if (tstbit(akt_daten[34],7) == 0) /* Analogausgang 2*/
+    {
+      temp_byte = akt_daten[34] & ~(1 << 8); /* oberestes Bit auf 0 setzen */
+      fprintf(stdout,"%.1f:",(float)temp_byte / 10);
+    }
+    else
+      fprintf(stdout,"0.0:"); /* Analogausgang nicht aktiv */
+
+    for (i=1;i<=2;i++)
+    {
+      if (WMReg[i] == 1)
+      {
+// noch anpassen?:        fprintf(stdout,"%d:",akt_daten[18]*0x100 + akt_daten[17]);
+        fprintf(stdout,"%.1f:%.1f:%.1f:",Mlstg[i], W_Mwh[i],W_kwh[i]);
+      }
+      else
+        fprintf(stdout,"0:0:0:0:0");
+	}
+  }
+
   fprintf(stdout,"\n");
   uvr_typ = temp_uvr_typ;
 }
@@ -2844,10 +3153,21 @@ void write_list(int regler)
   if (regler == 2)  /* 2. Geraet vorhanden */
     uvr_typ = uvr_typ2;
 //printf("UVR-Typ: %x\n",uvr_typ);
-  switch(uvr_typ)
+  if ( !is_uvr61_3_new_fmt() ) /* UVR61-3 altes Format */
   {
-    case UVR1611: anzSensoren = 16; break; /* UVR1611 */
-    case UVR61_3: anzSensoren = 6; break; /* UVR61-3 */
+    switch(uvr_typ)
+    {
+      case UVR1611: anzSensoren = 16; break; /* UVR1611 */
+      case UVR61_3: anzSensoren = 6; break; /* UVR61-3 */
+    }
+  }
+  else
+  {
+    switch(uvr_typ)
+    {
+      case UVR1611: anzSensoren = 16; break; /* UVR1611 */
+      case UVR61_3: anzSensoren = 15; break; /* UVR61-3 neues Format */
+    }
   }
 
   for(i=1;i<=anzSensoren;i++) /* sensor-Bezeichnungen */
@@ -2884,7 +3204,7 @@ void write_list(int regler)
         fprintf(stdout,"Ausgang%d = %d\n",i,AUSG[i]);
         fprintf(stdout,"Drehzahlstufe%d = %d\n",i,DZStufe[i]);
 	  }
-//        fprintf(stdout,"%d:%d:",AUSG[i],DZStufe[i]);
+        /* fprintf(stdout,"%d:%d:",AUSG[i],DZStufe[i]); */
         /*  fprintf(fp,"%2d; --;",AUSG[i]); */
     }
     /* A3-A5 */
@@ -2942,7 +3262,7 @@ void write_list(int regler)
     }
   }
 
-  if (uvr_typ == UVR61_3) /* UVR61-3 */
+  if ((uvr_typ == UVR61_3) && !is_uvr61_3_new_fmt() ) /* UVR61-3 altes Format*/
   {
     fprintf(stdout,"%d:%d:",AUSG[1],DZStufe[1]);
     fprintf(stdout,"%d:%d:",AUSG[2],AUSG[3]);
@@ -2962,6 +3282,38 @@ void write_list(int regler)
     }
     else
       fprintf(stdout,"0:0:0:0:0");
+  }
+
+  if ((uvr_typ == UVR61_3) && is_uvr61_3_new_fmt() ) /* UVR61-3 neues Format*/
+  {
+    fprintf(stdout,"%d:%d:",AUSG[1],DZStufe[1]);
+
+    if (tstbit(akt_daten[33],7) == 0) /* Analogausgang 1*/
+    {
+      temp_byte = akt_daten[33] & ~(1 << 8); /* oberestes Bit auf 0 setzen */
+      fprintf(stdout,"%.1f:",(float)temp_byte / 10);
+    }
+    else
+      fprintf(stdout,"0.0:"); /* Analogausgang nicht aktiv */
+
+    if (tstbit(akt_daten[34],7) == 0) /* Analogausgang 2*/
+    {
+      temp_byte = akt_daten[34] & ~(1 << 8); /* oberestes Bit auf 0 setzen */
+      fprintf(stdout,"%.1f:",(float)temp_byte / 10);
+    }
+    else
+      fprintf(stdout,"0.0:"); /* Analogausgang nicht aktiv */
+
+    for (i=1;i<=2;i++)
+    {
+      if (WMReg[i] == 1)
+      {
+// noch anpassen?:        fprintf(stdout,"%d:",akt_daten[18]*0x100 + akt_daten[17]);
+        fprintf(stdout,"%.1f:%.1f:%.1f:",Mlstg[i], W_Mwh[i],W_kwh[i]);
+      }
+      else
+        fprintf(stdout,"0:0:0:0:0");
+	}
   }
 
   fprintf(stdout,"\n");
@@ -3176,17 +3528,20 @@ int lies_conf(void)
 /* Modulmoduskennung abfragen */
 int get_modulmodus(void)
 {
-  int result;
+  int result=0;
   UCHAR sendbuf[1];       /*  sendebuffer fuer die Request-Commandos*/
   UCHAR empfbuf[1];
 //  int sendbuf[1];       /*  sendebuffer fuer die Request-Commandos*/
 //  int empfbuf[1];
 
   sendbuf[0]=VERSIONSABFRAGE;    /* Senden der Kopfsatz-abfrage */
+  struct timespec tv = { 0, 10 * 1000000 }; //seconds, nanoseconds
 
 /* ab hier unterscheiden nach USB und IP */
   if (usb_zugriff)
   {
+    /* D-LOGG verschluckt sonst den naechsten request */
+    (void) nanosleep(&tv, NULL );
     write_erg=write(fd,sendbuf,1);
     if (write_erg == 1)    /* Lesen der Antwort*/
       result=read(fd,empfbuf,1);
@@ -3201,3 +3556,117 @@ int get_modulmodus(void)
   return empfbuf[0];
 }
 
+/* Firmware Version abfragen */
+int get_fw_version(void)
+{
+  int result=0;
+  UCHAR sendbuf[1];       /*  sendebuffer fuer die Request-Commandos*/
+  UCHAR empfbuf[1];
+  struct timespec tv = { 0, 10 * 1000000 }; //seconds, nanoseconds
+
+  sendbuf[0]=FWABFRAGE;    /* Senden der Firmware-Versionsabfrage */
+/* ab hier unterscheiden nach USB und IP */
+  if (usb_zugriff)
+  {
+    /* D-LOGG verschluckt sonst den naechsten request */
+    (void) nanosleep(&tv, NULL );
+    write_erg=write(fd,sendbuf,1);
+    if (write_erg == 1)    /* Lesen der Antwort*/
+      result=read(fd,empfbuf,1);
+  }
+  if (ip_zugriff)
+  {
+    write_erg=send(sock,sendbuf,1,0);
+     if ( write_erg == 1)    /* Lesen der Antwort */
+      result  = recv(sock,empfbuf,1,0);
+  }
+#if DEBUG>1
+  fprintf(stderr,"Vom DL erhalten Version FW: 0x%x / %d\n",empfbuf[0],empfbuf[0]);
+#endif
+  return empfbuf[0];
+}
+
+/* Modultype Abfrage (incl. FW) */
+int get_modultype(void)
+{
+  int ret=0; /* 0=nicht erfolgreiche Abfrage */
+  int result=0;
+  UCHAR sendbuf[8] = { 0x20, 0x10, 0x18, 0x00, 0x00, 0x00, 0x00, 0x48 };       /*  sendebuffer fuer die Request-Commandos*/
+  UCHAR empfbuf[5] = { 0x00, 0x00, 0x00, 0x00, 0x00 };
+  struct timespec tv = { 0, 10 * 1000000 }; //seconds, nanoseconds
+
+/* ab hier unterscheiden nach USB und IP */
+  if (usb_zugriff)
+  {
+    /* D-LOGG verschluckt sonst den naechsten request */
+    (void) nanosleep(&tv, NULL );
+    write_erg=write(fd,sendbuf,8);
+    if (write_erg == 8)    /* Lesen der Antwort*/
+      result=read(fd,empfbuf,5);
+  }
+  if (ip_zugriff)
+  {
+    write_erg=send(sock,sendbuf,8,0);
+     if ( write_erg == 8)    /* Lesen der Antwort */
+      result = recv(sock,empfbuf,5,0);
+  }
+
+  /* Modultypekennung                     */
+  /* 0xA3: BL-Net                         */
+  /* 0xA2: BL232 (Datensicherung)         */
+  /* 0xA8: BL232 bzw DLoggUSB (Modus 1DL) */
+  /* 0xD1: BL232 bzw DLoggUSB (Modus 2DL) */
+  if ( empfbuf[0] == 0x21 && empfbuf[1] == 0x43 )
+  {
+     if ( ((empfbuf[2] + empfbuf[3]) % 0x100) == empfbuf[4] )
+	 {
+	   modultype=empfbuf[2];  /* Modultypekennung */
+	   if (empfbuf[3] > 0)
+	     fw_version=empfbuf[3]; /* Firmwareversion */
+	   ret=1;
+	 }
+  }
+#if DEBUG>1
+  fprintf(stderr," Modultype: %x \n", modultype);
+#endif
+  
+  return ret;
+}
+
+/* Ermitteln, ob neues UVR61-3 Format */
+int is_uvr61_3_new_fmt(void)
+{
+  /* Modultypekennung                     */
+  /* 0xA3: BL-Net                         */
+  /* 0xA2: BL232 (Datensicherung)         */
+  /* 0xA8: BL232 bzw DLoggUSB (Modus 1DL) */
+  /* 0xD1: BL232 bzw DLoggUSB (Modus 2DL) */
+  int ret;
+  if (uvr61_3_new_fmt_check == 1)
+	  return 1;
+
+  ret=0;
+
+  /* BL-Net ab Version 2.17 */
+  if ( (modultype == 0xA3) && (fw_version >= 217) ) 
+  {
+	uvr61_3_new_fmt_check = 1;
+    ret=1;
+  }
+
+  /* BL232/D-LOGG ab Version 2.9 */
+  if ( (modultype == 0xA8) && (fw_version >= 29) )
+  {
+    uvr61_3_new_fmt_check = 1;
+    ret=1;
+  }
+  if ( (modultype == 0xD1) && (fw_version >= 29) )
+  {
+    uvr61_3_new_fmt_check = 1;
+    ret=1;  
+  }
+#if DEBUG
+  fprintf(stderr,"is_uvr61_3_new_fmt():\n Modultype: %x ; fw_version: %hhu ; ret=%d\n", modultype,fw_version,ret);
+#endif
+  return ret;
+}
