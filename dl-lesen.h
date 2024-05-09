@@ -27,8 +27,10 @@
  * 22.10.2007 H. Roemer      - UVR61-3 hinzugefuegt                          *
  *    11.2007 H. Roemer      - Modus 2DL (0xD1) hinzugefuegt                 *
  *    01.2010 H. Roemer      - CAN-Logging                                   *
+ *    10.2014 H. Roemer      - UVR61-3 neues Log-Format                      *
  *****************************************************************************/
 
+#define MODULTYPABFRAGE 0x4800000000181020
 #define VERSIONSABFRAGE 0x81
 #define FWABFRAGE 0x82
 #define MODEABFRAGE 0x21
@@ -189,6 +191,58 @@ typedef struct {
   UCHAR unbenutzt2[25];
 } DS_Winsol_UVR61_3;
 
+/* Datenstruktur des Datensatzes fuer Winsol / Solstat (Logdatei) UVR61-3   */
+/* Auswertesoftware Version 2.x */
+/* DSWinsol_UVR61_3_2x */
+typedef struct {
+  /* timestamp */
+  UCHAR tag;
+  UCHAR std;
+  UCHAR min;
+  UCHAR sek;
+
+  /*  Ausgaenge durch bits: */
+  /*   leer1 leer2 leer3 leer4 leer5 a3 a2 a1*/
+  UCHAR ausgbyte1;
+
+  /* drehzahlwert Ausgang A1 */
+  UCHAR dza;
+
+  /* Analog Ausgang */
+  UCHAR ausg_analog[2];
+
+  /* Sensor-Eingaenge */
+  UCHAR sensT[6][2];
+
+  /* nicht benutzt */
+  UCHAR extT[9][2];
+
+  /* WMZ 1/2/3 aktiv in bit 1/2/3 */
+  UCHAR wmzaehler_reg;
+
+  /* Solar1: momentane Leistung, Waermemenge kWh/MWh */
+  UCHAR mlstg1[2];
+  UCHAR kwh1[2];
+  UCHAR mwh1[4];
+
+  /* Solar2: momentane Leistung, Waermemenge kWh/MWh */
+  UCHAR mlstg2[2];
+  UCHAR kwh2[2];
+  UCHAR mwh2[4];
+
+  /* Solar3: momentane Leistung, Waermemenge kWh/MWh */
+  UCHAR mlstg3[2];
+  UCHAR kwh3[2];
+  UCHAR mwh3[4];
+
+  /* nicht benutzt */
+  UCHAR unbenutzt2[1];
+  
+  /* Datenformat: 01 = Winsol 2.x */
+  UCHAR dformat;
+  
+} DS_Winsol_UVR61_3_2x;
+
 /* Datenstuktur des Datensatzes aus dem Datenlogger / Bootloader kommend */
 /* the_datum_zeit */
 typedef struct{
@@ -284,6 +338,48 @@ typedef union{
     UCHAR zeitstempel[3];
     UCHAR pruefsum;  /* Summer der Bytes mod 256 */
   } DS_UVR61_3;
+  /* UVR61-3 (neues Format) Datensatz DS_UVR61_3_2x */
+  struct {
+    /* Sensor-Eingaenge */
+    UCHAR sensT[6][2];
+
+    /* Externe Sensor-Eingaenge */
+    UCHAR extT[9][2];
+
+    /*  Ausgaenge durch bits: */
+    /*   leer1 leer2 leer3 leer4 leer5 a3 a2 a1*/
+    UCHAR ausgbyte1;
+
+    /* Drehzahlausgaenge */
+    UCHAR dza;
+
+    /* 3 Analog Ausgaenge */
+    UCHAR ausg_analog[3];
+
+    /* WMZ 1/2/3 aktiv in bit 1/2/3 */
+    /*   leer1 leer2 leer3 leer4 leer5 a3 a2 a1*/
+    UCHAR wmzaehler_reg;
+
+    /* Solar2: momentane Leistung, Waermemenge kWh/MWh */
+    UCHAR mlstg1[2];
+    UCHAR kwh1[2];
+    UCHAR mwh1[2];
+
+    /* Solar2: momentane Leistung, Waermemenge kWh/MWh */
+    UCHAR mlstg2[2];
+    UCHAR kwh2[2];
+    UCHAR mwh2[2];
+
+    /* Solar3: momentane Leistung, Waermemenge kWh/MWh */
+    UCHAR mlstg3[2];
+    UCHAR kwh3[2];
+    UCHAR mwh3[2];
+
+    the_datum_zeit datum_zeit;
+
+    UCHAR zeitstempel[3];
+    UCHAR pruefsum;  /* Summer der Bytes mod 256 */
+  } DS_UVR61_3_2x; 
 } u_DS_UVR1611_UVR61_3;
 
 /* Datenstuktur des Datensatzes CAN-Modus       */
