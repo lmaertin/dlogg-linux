@@ -1,1 +1,0 @@
-gcc -o winsol2csv winsol2csv.c
