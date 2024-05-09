@@ -15,6 +15,12 @@ Benutzung (Beispiel):
 ./dl-aktuelle-daten -p /dev/ttyUSB1 -t 0
 
 
+
+
+
+Originale Dokumentation:
+
+
 dl-aktuelle-daten
 -------------------------------------------------------------------------------
 
