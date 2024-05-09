@@ -1,7 +1,24 @@
-dl-aktuelle-datenx
+Modifizierte Version von dl-aktuelle-daten zum Auslesen der Rohwerte aus 1 oder mehreren UVRs.
+Zur Anwednung in einer Home Assistant Umgebung.
+
+
+Build (in HA Umgebung, Terminal)
+--------------------------------
+git clone https://github.com/lmaertin/dlogg-linux.git
+apk add build-base ncurses-dev
+cd dlogg-linux
+make
+
+
+Benutzung (Beispiel):
+---------------------
+./dl-aktuelle-daten -p /dev/ttyUSB1 -t 0
+
+
+dl-aktuelle-daten
 -------------------------------------------------------------------------------
 
-Das Progamm "dl-aktuelle-datenx" liest die aktuellen Daten der UVR1611 oder der
+Das Progamm "dl-aktuelle-daten" liest die aktuellen Daten der UVR1611 oder der
 UVR61-3 aus dem D-LOGG USB bzw. dem BL-Net unter Linux ein. Diese werden am 
 Bildschirm dargestellt oder im csv-Format gespeichert.
 
@@ -24,23 +41,23 @@ Die Bibliothek ncurses muss installiert sein.
 
 Installation:
 -------------
-Die Programm-Datei >dl-aktuelle-datenx< sollte in das Verzeichnis /usr/local/bin 
+Die Programm-Datei >dl-aktuelle-daten< sollte in das Verzeichnis /usr/local/bin 
 kopiert werden.
 Die Rechte (vor allem das Ausfuehr-Recht) muessen den eigenen Gegebenheiten 
 angepasst werden.
-Die Datei >dl-aktuelle-datenx.conf< muss in das Verzeichnis /etc/ kopiert 
+Die Datei >dl-aktuelle-daten.conf< muss in das Verzeichnis /etc/ kopiert 
 werden. Das Recht "Lesen" sollten fuer alle gelten, midestens jedoch fuer den 
 User, der das Programm ausfuehrt.
 
-Die Datei >dl-aktuelle-datenx.conf< liegt als Beispiel-Datei unter dem Namen
->dl-aktuelle-datenx.conf_sample< dem Archiv bei. Eine Beschreibung der 
+Die Datei >dl-aktuelle-daten.conf< liegt als Beispiel-Datei unter dem Namen
+>dl-aktuelle-daten.conf_sample< dem Archiv bei. Eine Beschreibung der 
 Einstellung ist in dieser Datei enthalten. Es handelt sich bei dieser Datei 
 um eine reine Text-Datei. Sie kann mit jedem beliebigen Editor, 
 der Unix-konform speichert, bearbeitet werden.
 
 Aufruf des Prgramms:
 --------------------
-dl-aktuelle-datenx (-p USB-Port | -i IP:Port) [-t sek] [-r DR] [-h] [-v] [--csv] [--rrd] 
+dl-aktuelle-daten (-p USB-Port | -i IP:Port) [-t sek] [-r DR] [-h] [-v] [--csv] [--rrd] 
     -p USB-Port -> Angabe des USB-Portes,
                    an dem der D-LOGG angeschlossen ist.
     -i IP:Port  -> Angabe der IP-Adresse und des Ports,
@@ -61,11 +78,11 @@ dl-aktuelle-datenx (-p USB-Port | -i IP:Port) [-t sek] [-r DR] [-h] [-v] [--csv]
           -h    -> diesen Hilfetext
           -v    -> Versionsangabe
 
-Beispiel: dl-aktuelle-datenx -p /dev/ttyUSB0 -t 30 
+Beispiel: dl-aktuelle-daten -p /dev/ttyUSB0 -t 30 
           Liest alle 30s die aktuellen Daten vom USB-Port 0 .
-          dl-aktuelle-datenx -i 192.168.1.1:40000 -t 30 
+          dl-aktuelle-daten -i 192.168.1.1:40000 -t 30 
           Liest alle 30s die aktuellen Daten von IP 192.168.1.1 Port 40000 .
-          dl-aktuelle-datenx -i 192.168.1.1:40000 -t 0 -r 2
+          dl-aktuelle-daten -i 192.168.1.1:40000 -t 0 -r 2
           Liest einmal die aktuellen Daten von IP 192.168.1.1 Port 40000,
           2. Datenrahmen.
 
@@ -75,7 +92,7 @@ fuer Scripte, die eine rrdtool-basierte Datenbank fuellen (wie zum Beispiel cact
 genutzt werden.
 
 Hinweise zum Paramter "-t 0":
-Mit diesem Paramter können vielfältige Ergebnisse erzielt werden. Er eigenet sich
+Mit diesem Paramter kï¿½nnen vielfï¿½ltige Ergebnisse erzielt werden. Er eigenet sich
 insbesondere zum Einsatz in eigenen Scripten. Zum Beispiel koennen die Daten 
 damit in eine SQL-Datenbank eingetragen werden oder es kann z. Bsp. eine 
 graphische Ausgabe (PNG/JPG) mittels PHP-Script erzeugt werden. Hierfuer ist dem 
