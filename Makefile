@@ -1,15 +1,9 @@
-EXECUTABLES = dl-aktuelle-daten dl-aktuelle-daten-no-curses dl-lesen
+EXECUTABLES = dl-aktuelle-daten
 
 all: $(EXECUTABLES)
 
-dl-aktuelle-daten: dl-aktuelle-daten.c dl-lesen.h
+dl-aktuelle-daten: dl-aktuelle-daten.c 
 		$(CC) -o dl-aktuelle-daten dl-aktuelle-daten.c -lncurses -lpanel
-
-dl-aktuelle-daten-no-curses: dl-aktuelle-daten-no-curses.c dl-lesen.h
-		$(CC) -o dl-aktuelle-daten-no-curses dl-aktuelle-daten-no-curses.c
-
-dl-lesen: dl-lesen.c dl-lesen.h
-	$(CC) -o dl-lesen dl-lesen.c
 
 clean:
 	rm -v $(EXECUTABLES)
